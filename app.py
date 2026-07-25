@@ -172,8 +172,4 @@ if uploaded_file and api_key_input:
                 st.error(f"Extraction failed: {e}")
 
 st.markdown("---")
-st.caption(
-    "This is a demo build. For client work: swap the schema above for whatever "
-    "fields the client needs, add OCR for scanned docs, and wrap this logic "
-    "into whatever delivery format they want (API, script, or this same UI)."
-)
+
