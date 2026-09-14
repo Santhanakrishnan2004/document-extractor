@@ -76,6 +76,12 @@ EXTRACTION_SCHEMA = {
 MODEL = "openai/gpt-oss-120b"  # fast + free-tier friendly on Groq
 
 # ---------------------------------------------------------------------
+# BRANDING — edit these before sending the link to a prospect
+# ---------------------------------------------------------------------
+FREELANCER_NAME = "Santhana Krishnan"
+CONTACT_LINK = "santhanakrishnan9704@gmail.com"
+
+# ---------------------------------------------------------------------
 # CORE FUNCTIONS
 # ---------------------------------------------------------------------
 
@@ -198,16 +204,67 @@ def to_xero_bills_csv(
     return pd.DataFrame(rows)
 
 
+def to_quickbooks_csv(
+    data: dict,
+    category: str,
+    terms: str,
+    due_days: int,
+    date_fmt: str,
+) -> pd.DataFrame:
+    """Maps extracted invoice data onto the column layout used by the
+    common QuickBooks Online bulk-import apps (SaasAnt Transactions,
+    Transaction Pro Importer) for Bills. QBO itself has no native generic
+    CSV-import screen for bills, so one of these apps is the standard route
+    for getting a CSV like this into a client's QuickBooks."""
+    vendor = data.get("vendor_name") or "Unknown Vendor"
+    bill_no = data.get("document_number") or ""
+    currency = data.get("currency") or ""
+
+    bill_date = pd.to_datetime(data.get("date"), errors="coerce")
+    if pd.isna(bill_date):
+        bill_date = pd.Timestamp.today()
+    due_date = bill_date + pd.Timedelta(days=due_days)
+
+    line_items = data.get("line_items") or []
+    if not line_items:
+        line_items = [
+            {
+                "description": vendor,
+                "quantity": 1,
+                "unit_price": data.get("total_amount") or 0,
+            }
+        ]
+
+    rows = []
+    for item in line_items:
+        rate = item.get("unit_price")
+        if rate is None:
+            rate = item.get("amount") or 0
+        rows.append(
+            {
+                "*VendorName": vendor,
+                "*BillNo": bill_no,
+                "*BillDate": bill_date.strftime(date_fmt),
+                "*DueDate": due_date.strftime(date_fmt),
+                "Terms": terms,
+                "Category": category,
+                "*Description": item.get("description") or vendor,
+                "*Qty": item.get("quantity") or 1,
+                "*Rate": rate,
+                "Currency": currency,
+            }
+        )
+    return pd.DataFrame(rows)
+
+
 # ---------------------------------------------------------------------
 # STREAMLIT UI
 # ---------------------------------------------------------------------
 
-st.set_page_config(page_title="AI Document Data Extractor", page_icon="📄")
-
-st.title("📄 AI Document Data Extractor")
-st.caption(
-    "Upload a PDF and let AI pull out structured data — no manual typing, "
-    "and export straight to a Xero-ready bill import. Powered by Groq."
+st.set_page_config(
+    page_title="AI Document Data Extractor",
+    page_icon="📄",
+    layout="wide",
 )
 
 if "extraction_count" not in st.session_state:
@@ -217,8 +274,31 @@ if "result" not in st.session_state:
 
 shared_api_key = get_shared_api_key()
 
+# ---------------------------------------------------------------------
+# HEADER
+# ---------------------------------------------------------------------
+st.title("📄 AI Document Data Extractor")
+st.caption(
+    "Upload an invoice PDF and AI pulls out the structured data — then export "
+    "it ready-to-import into **Xero** or **QuickBooks**, no manual re-typing."
+)
+
+step1, step2, step3 = st.columns(3)
+step1.info("**1. Upload**\n\nDrop in an invoice or receipt PDF (or try the sample).")
+step2.info(
+    "**2. AI extracts**\n\nVendor, line items, dates, and totals — pulled automatically."
+)
+step3.info(
+    "**3. Export**\n\nDownload a CSV/Excel, or one formatted for Xero or QuickBooks."
+)
+
+st.markdown("---")
+
+# ---------------------------------------------------------------------
+# SIDEBAR
+# ---------------------------------------------------------------------
 with st.sidebar:
-    st.header("Setup")
+    st.header("⚙️ Setup")
     if shared_api_key:
         st.success("Demo key active — no setup needed, just try it below.")
         with st.expander("Use your own Groq API key instead"):
@@ -236,18 +316,49 @@ with st.sidebar:
         )
         st.markdown("[Get a free Groq API key →](https://console.groq.com/keys)")
 
-    st.header("Xero export settings")
-    st.caption(
-        "Used to build the Xero-ready CSV — match these to the client's Xero org."
-    )
-    xero_account_code = st.text_input("Default account code", value="400")
-    xero_tax_type = st.text_input(
-        "Default tax type (exact name from client's Xero)", value="Tax Exempt"
-    )
-    xero_due_days = st.number_input(
-        "Due date = invoice date +", min_value=0, max_value=120, value=30, step=1
-    )
-    xero_date_fmt = st.selectbox("Date format", ["DD/MM/YYYY", "MM/DD/YYYY"], index=0)
+    st.header("📤 Export settings")
+    st.caption("Match these to the client's accounting setup before importing.")
+
+    with st.expander("🟦 Xero", expanded=True):
+        xero_account_code = st.text_input("Account code", value="400")
+        xero_tax_type = st.text_input(
+            "Tax type (exact name from client's Xero)", value="Tax Exempt"
+        )
+        xero_due_days = st.number_input(
+            "Due date = invoice date +",
+            min_value=0,
+            max_value=120,
+            value=30,
+            step=1,
+            key="xero_due_days",
+        )
+        xero_date_fmt = st.selectbox(
+            "Date format", ["DD/MM/YYYY", "MM/DD/YYYY"], index=0, key="xero_date_fmt"
+        )
+
+    with st.expander("🟩 QuickBooks"):
+        qb_category = st.text_input("Expense category/account", value="Office Supplies")
+        qb_terms = st.text_input("Payment terms", value="Net 30")
+        qb_due_days = st.number_input(
+            "Due date = invoice date +",
+            min_value=0,
+            max_value=120,
+            value=30,
+            step=1,
+            key="qb_due_days",
+        )
+        qb_date_fmt = st.selectbox(
+            "Date format", ["MM/DD/YYYY", "DD/MM/YYYY"], index=0, key="qb_date_fmt"
+        )
+
+    if st.session_state.result:
+        st.markdown("---")
+        if st.button("🔄 Start over / try another document", use_container_width=True):
+            st.session_state.result = None
+            st.rerun()
+
+    st.markdown("---")
+    st.caption(f"Built by **{FREELANCER_NAME}** · [Get in touch]({CONTACT_LINK})")
 
 col_upload, col_sample = st.columns([2, 1])
 with col_upload:
@@ -310,55 +421,96 @@ elif doc_text:
 
 if st.session_state.result:
     result = st.session_state.result
+    st.success("✅ Extraction complete!")
 
-    st.success("Extraction complete!")
-    st.subheader("Extracted JSON")
-    st.json(result)
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Vendor", result.get("vendor_name") or "—")
+    m2.metric("Invoice #", result.get("document_number") or "—")
+    m3.metric("Date", result.get("date") or "—")
+    total = result.get("total_amount")
+    currency = result.get("currency") or ""
+    m4.metric("Total", f"{currency} {total}".strip() if total is not None else "—")
 
     df = flatten_for_table(result)
-    st.subheader("Table view")
-    st.dataframe(df, use_container_width=True)
-
-    csv_bytes = df.to_csv(index=False).encode("utf-8")
-    st.download_button(
-        "⬇️ Download CSV",
-        data=csv_bytes,
-        file_name="extracted_data.csv",
-        mime="text/csv",
-    )
-
-    excel_buffer = io.BytesIO()
-    df.to_excel(excel_buffer, index=False, engine="openpyxl")
-    st.download_button(
-        "⬇️ Download Excel",
-        data=excel_buffer.getvalue(),
-        file_name="extracted_data.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    )
-
-    st.subheader("Xero-ready export")
-    pd_date_fmt = "%d/%m/%Y" if xero_date_fmt == "DD/MM/YYYY" else "%m/%d/%Y"
+    pd_xero_fmt = "%d/%m/%Y" if xero_date_fmt == "DD/MM/YYYY" else "%m/%d/%Y"
     xero_df = to_xero_bills_csv(
         result,
         account_code=xero_account_code,
         tax_type=xero_tax_type,
         due_days=int(xero_due_days),
-        date_fmt=pd_date_fmt,
+        date_fmt=pd_xero_fmt,
     )
-    st.caption(
-        "Formatted for Xero's **Business > Bills to pay > Import** CSV template. "
-        "Tweak the account code/tax type in the sidebar to match a client's chart of accounts — "
-        "the table below updates instantly. Double-check both before importing."
+    pd_qb_fmt = "%m/%d/%Y" if qb_date_fmt == "MM/DD/YYYY" else "%d/%m/%Y"
+    qb_df = to_quickbooks_csv(
+        result,
+        category=qb_category,
+        terms=qb_terms,
+        due_days=int(qb_due_days),
+        date_fmt=pd_qb_fmt,
     )
-    st.dataframe(xero_df, use_container_width=True)
 
-    xero_csv_bytes = xero_df.to_csv(index=False).encode("utf-8")
-    st.download_button(
-        "⬇️ Download Xero CSV (Bills import)",
-        data=xero_csv_bytes,
-        file_name="xero_bill_import.csv",
-        mime="text/csv",
+    tab_data, tab_xero, tab_qb = st.tabs(
+        ["📋 Extracted Data", "🟦 Xero Export", "🟩 QuickBooks Export"]
     )
+
+    with tab_data:
+        st.subheader("Table view")
+        st.dataframe(df, use_container_width=True)
+
+        dl1, dl2 = st.columns(2)
+        with dl1:
+            csv_bytes = df.to_csv(index=False).encode("utf-8")
+            st.download_button(
+                "⬇️ Download CSV",
+                data=csv_bytes,
+                file_name="extracted_data.csv",
+                mime="text/csv",
+                use_container_width=True,
+            )
+        with dl2:
+            excel_buffer = io.BytesIO()
+            df.to_excel(excel_buffer, index=False, engine="openpyxl")
+            st.download_button(
+                "⬇️ Download Excel",
+                data=excel_buffer.getvalue(),
+                file_name="extracted_data.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+            )
+
+        with st.expander("Raw JSON"):
+            st.json(result)
+
+    with tab_xero:
+        st.caption(
+            "Formatted for Xero's **Business > Bills to pay > Import** CSV template. "
+            "Tweak the account code/tax type in the sidebar to match a client's chart of "
+            "accounts — this updates instantly. Double-check both before importing."
+        )
+        st.dataframe(xero_df, use_container_width=True)
+        xero_csv_bytes = xero_df.to_csv(index=False).encode("utf-8")
+        st.download_button(
+            "⬇️ Download Xero CSV (Bills import)",
+            data=xero_csv_bytes,
+            file_name="xero_bill_import.csv",
+            mime="text/csv",
+        )
+
+    with tab_qb:
+        st.caption(
+            "Formatted for the column layout used by common QuickBooks Online bulk-import "
+            "apps (e.g. SaasAnt Transactions, Transaction Pro Importer) — QBO has no native "
+            "generic CSV bill-import screen, so one of those apps is the usual way in. "
+            "Tweak the category/terms in the sidebar to match the client's chart of accounts."
+        )
+        st.dataframe(qb_df, use_container_width=True)
+        qb_csv_bytes = qb_df.to_csv(index=False).encode("utf-8")
+        st.download_button(
+            "⬇️ Download QuickBooks CSV (Bill import)",
+            data=qb_csv_bytes,
+            file_name="quickbooks_bill_import.csv",
+            mime="text/csv",
+        )
 
 st.markdown("---")
 st.caption(
@@ -366,3 +518,4 @@ st.caption(
     "(Xero, QuickBooks, plain CSV), or add OCR for scanned documents to fit "
     "your specific paperwork."
 )
+st.caption(f"— {FREELANCER_NAME} · [{CONTACT_LINK}]({CONTACT_LINK})")
